@@ -1,0 +1,12 @@
+# Core
+apify-client
+networkx
+
+# MCP server
+mcp
+
+
+pyvis
+
+sentence-transformers>=3.0.0; extra == "embeddings"
+numpy>=1.26.0; extra == "embeddings"
