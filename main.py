@@ -1,9 +1,3 @@
-"""
-main.py — Nike Instagram Graph Intelligence — Bootstrap
-Ensures data is ingested and graph is built before the MCP server starts.
-All querying happens via Claude Desktop (MCP) — no CLI interface.
-"""
-
 import json
 import sys
 from pathlib import Path

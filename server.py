@@ -1,9 +1,7 @@
 import asyncio
-import http.server
 import json
 import logging
 import os
-import threading
 from pathlib import Path
 from typing import Any
 import sys
@@ -16,34 +14,18 @@ PROJECT_DIR = Path(__file__).parent.resolve()
 os.chdir(PROJECT_DIR)
 sys.path.insert(0, str(PROJECT_DIR))
 
+# Ensure Unicode output is safe on Windows terminals / MCP stdio transport.
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 from dotenv import load_dotenv
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="[server] %(message)s")
 log = logging.getLogger(__name__)
-
-GRAPH_VIEW   = Path("graph_view.html")
-STATIC_HOST  = "localhost"
-STATIC_PORT  = int(os.getenv("NIKE_GRAPH_PORT", "8765"))
-
-_http_started = False
-
-def _start_file_server():
-    global _http_started
-    if _http_started:
-        return
-
-    class _H(http.server.SimpleHTTPRequestHandler):
-        def log_message(self, *a): pass
-
-    def _serve():
-        os.chdir(str(Path(__file__).parent))
-        with http.server.HTTPServer((STATIC_HOST, STATIC_PORT), _H) as s:
-            s.serve_forever()
-
-    threading.Thread(target=_serve, daemon=True).start()
-    _http_started = True
-    log.info(f"File server: http://{STATIC_HOST}:{STATIC_PORT}")
 
 
 app = Server("nike-instagram-graph")
@@ -135,6 +117,7 @@ def _engagement() -> dict:
 
 
 def _visual(args: dict) -> dict:
+    import webbrowser
     from visualize import generate_visualization
     filters = {}
     if args.get("month"):      filters["month"]      = args["month"]
@@ -142,12 +125,13 @@ def _visual(args: dict) -> dict:
     if args.get("min_likes"):  filters["min_likes"]  = int(args["min_likes"])
 
     path = generate_visualization(filters=filters or None)
-    _start_file_server()
-    url = f"http://{STATIC_HOST}:{STATIC_PORT}/{path.name}"
+    abs_path = str(path.resolve())
+    file_url = "file:///" + abs_path.replace("\\", "/")
+    webbrowser.open(file_url)
     return {
-        "url":             url,
-        "file":            str(path.resolve()),
-        "message":         f"Open {url} in your browser.",
+        "file":            abs_path,
+        "url":             file_url,
+        "message":         "Graph opened in your browser automatically.",
         "filters_applied": filters,
     }
 

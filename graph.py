@@ -1,10 +1,3 @@
-"""
-graph.py — Nike Instagram Knowledge Graph Engine
-Pure networkx graph — zero LLM / OpenAI dependency.
-Similarity search uses sentence-transformers (local, free).
-All analytics are deterministic Python.
-"""
-
 from __future__ import annotations
 
 import json
@@ -15,18 +8,12 @@ from typing import Any, Optional
 
 import networkx as nx
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
 
 DATA_DIR       = Path("data")
 PROCESSED_PATH = DATA_DIR / "nike_processed.json"
 GRAPH_PATH     = DATA_DIR / "graph_store" / "graph.gpickle"
 EMBED_PATH     = DATA_DIR / "graph_store" / "embeddings.pkl"
 
-# ---------------------------------------------------------------------------
-# Graph build
-# ---------------------------------------------------------------------------
 
 def build_graph(force_rebuild: bool = False) -> nx.DiGraph:
     GRAPH_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -35,14 +22,14 @@ def build_graph(force_rebuild: bool = False) -> nx.DiGraph:
         try:
             return _load()
         except Exception as e:
-            print(f"[graph] ️  Existing graph unreadable ({e}) — rebuilding …")
+            print(f"[graph] Existing graph unreadable ({e}) - rebuilding ...")
             GRAPH_PATH.unlink(missing_ok=True)
 
     if not PROCESSED_PATH.exists():
         raise FileNotFoundError(f"Run ingest.py first — {PROCESSED_PATH} not found.")
 
     posts: list[dict] = json.loads(PROCESSED_PATH.read_text())
-    print(f"[graph] Building graph from {len(posts)} posts …")
+    print(f"[graph] Building graph from {len(posts)} posts ...")
 
     G = nx.DiGraph()
 
@@ -73,14 +60,14 @@ def build_graph(force_rebuild: bool = False) -> nx.DiGraph:
                 G.add_node(tag_id, node_type="hashtag", label=tag_id)
             G.add_edge(pid, tag_id, relation="HAS_HASHTAG")
 
-        # Mention nodes (@athlete / collaborator)
+        # Mention nodes
         for mention in p.get("mentions", []):
             m_id = f"@{mention}"
             if not G.has_node(m_id):
                 G.add_node(m_id, node_type="mention", label=m_id)
             G.add_edge(pid, m_id, relation="MENTIONS")
 
-        # Theme nodes (campaign themes inferred from caption)
+        # Theme nodes 
         for theme in p.get("themes", []):
             t_id = f"theme:{theme}"
             if not G.has_node(t_id):
@@ -102,8 +89,10 @@ def build_graph(force_rebuild: bool = False) -> nx.DiGraph:
     with open(GRAPH_PATH, "wb") as f:
         pickle.dump(G, f)
 
-    print(f"[graph] Graph saved -> {GRAPH_PATH}  "
-          f"({G.number_of_nodes()} nodes, {G.number_of_edges()} edges)")
+    print(
+        f"[graph] Graph saved -> {GRAPH_PATH}  "
+        f"({G.number_of_nodes()} nodes, {G.number_of_edges()} edges)"
+    )
     return G
 
 
@@ -120,11 +109,6 @@ def load_graph() -> nx.DiGraph:
         return _load()
     return build_graph()
 
-
-# ---------------------------------------------------------------------------
-# Embeddings for similarity search (sentence-transformers, local)
-# ---------------------------------------------------------------------------
-
 def _build_embeddings(posts: list[dict]) -> dict[str, Any]:
     """Build and cache caption embeddings using a local sentence-transformer model."""
     try:
@@ -132,7 +116,7 @@ def _build_embeddings(posts: list[dict]) -> dict[str, Any]:
     except ImportError:
         return {}
 
-    print("[graph] Building caption embeddings (sentence-transformers) …")
+    print("[graph] Building caption embeddings (sentence-transformers) ...")
     model = SentenceTransformer("all-MiniLM-L6-v2")  # ~80 MB, downloads once
 
     ids      = [p["post_id"] for p in posts]
@@ -154,19 +138,12 @@ def _load_embeddings() -> dict:
         return pickle.load(f)
 
 
-# ---------------------------------------------------------------------------
-# Data loader helper
-# ---------------------------------------------------------------------------
 
 def _posts() -> list[dict]:
     if not PROCESSED_PATH.exists():
         raise FileNotFoundError("Run ingest.py first.")
     return json.loads(PROCESSED_PATH.read_text())
 
-
-# ---------------------------------------------------------------------------
-# Analytics (all deterministic, no LLM)
-# ---------------------------------------------------------------------------
 
 def get_engagement_summary() -> dict[str, Any]:
     posts = _posts()
@@ -291,7 +268,7 @@ def find_similar_posts(post_id: str, top_k: int = 5) -> dict[str, Any]:
 
     target = post_map[post_id]
 
-    # Try embedding similarity first
+
     embed_data = _load_embeddings()
     if embed_data and "ids" in embed_data:
         import numpy as np
@@ -323,7 +300,7 @@ def find_similar_posts(post_id: str, top_k: int = 5) -> dict[str, Any]:
                 ],
             }
 
-    # Fallback: Jaccard on hashtags
+
     target_tags = set(target["hashtags"])
     sims = []
     for p in posts:
@@ -360,7 +337,7 @@ def extract_subgraph(filters: Optional[dict] = None) -> dict[str, Any]:
 
     nodes: list[dict] = []
     edges: list[dict] = []
-    seen: dict = {}   # id -> True, to deduplicate all non-post nodes
+    seen: dict = {}
 
     max_likes = max((p["like_count"] for p in posts), default=1)
 

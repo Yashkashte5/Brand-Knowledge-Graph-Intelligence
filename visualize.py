@@ -1,13 +1,3 @@
-"""
-visualize.py — Nike Instagram Knowledge Graph Visualisation
-Standalone HTML using vis-network. Designed to match fast-graphrag demo quality:
-- Particle-like node glow
-- Cluster-style layout with distinct node type sizing
-- Animated edges with varied weights
-- Rich tooltip with caption preview
-- Mini-map + search
-"""
-
 from __future__ import annotations
 import json
 from pathlib import Path
@@ -51,7 +41,7 @@ def generate_visualization(
     title: str = "Nike Instagram Knowledge Graph",
 ) -> Path:
     from graph import extract_subgraph
-    print("[visualize] Extracting subgraph …")
+    print("[visualize] Extracting subgraph ...")
     subgraph = extract_subgraph(filters)
     print(f"[visualize] {len(subgraph['nodes'])} nodes, {len(subgraph['edges'])} edges")
     path = _render(subgraph, output_path, title)
@@ -186,9 +176,10 @@ def _render(subgraph: dict, output_path: Path, title: str) -> Path:
     background:rgba(6,10,15,.97);
     border:1px solid rgba(255,255,255,.1);
     border-radius:10px;padding:12px 15px;color:#c9d1d9;font-size:11px;
-    pointer-events:auto;display:none;z-index:300;max-width:260px;
+    pointer-events:auto;display:none;z-index:300;max-width:280px;
     backdrop-filter:blur(16px);line-height:1.7;
     box-shadow:0 8px 40px rgba(0,0,0,.7);
+    transition: opacity 0.15s ease;
   }}
   #tip .tip-title{{font-weight:700;font-size:12px;color:#e6edf3;margin-bottom:6px}}
   #tip .tip-row{{display:flex;justify-content:space-between;gap:12px}}
@@ -198,8 +189,13 @@ def _render(subgraph: dict, output_path: Path, title: str) -> Path:
     margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,.06);
     color:#8b949e;font-size:10px;line-height:1.5;font-style:italic;
   }}
-  #tip a{{color:#FF4500;text-decoration:none;font-weight:600}}
-  #tip a:hover{{text-decoration:underline}}
+  #tip a{{
+    display:inline-block;margin-top:8px;padding:5px 12px;
+    background:rgba(255,69,0,.15);border:1px solid rgba(255,69,0,.4);
+    border-radius:6px;color:#FF4500;text-decoration:none;font-weight:600;font-size:11px;
+    transition:background .15s;
+  }}
+  #tip a:hover{{background:rgba(255,69,0,.3);text-decoration:none}}
 
   /* Node click highlight ring */
   #selected-info{{
@@ -392,36 +388,58 @@ function resetView() {{
 
 // ----- Tooltip -----
 const tip = document.getElementById('tip');
-let hoveringTip = false;
+let tipPinned = false;
+let hideTimer = null;
 
 tip.addEventListener('mouseenter', () => {{
-  hoveringTip = true;
+  tipPinned = true;
+  if (hideTimer) {{ clearTimeout(hideTimer); hideTimer = null; }}
 }});
 
 tip.addEventListener('mouseleave', () => {{
-  hoveringTip = false;
+  tipPinned = false;
   tip.style.display = 'none';
 }});
+
+function showTip(html, x, y) {{
+  tip.innerHTML = html;
+  tip.style.display = 'block';
+  tipPinned = false;
+
+  // Position tooltip: prefer right of cursor, flip left if near edge
+  const tw = 290;
+  const th = tip.offsetHeight || 180;
+  const margin = 16;
+  let left = x + margin;
+  let top  = y - 10;
+  if (left + tw > window.innerWidth - 10)  left = x - tw - margin;
+  if (top  + th > window.innerHeight - 10) top  = window.innerHeight - th - 10;
+  top = Math.max(52, top);
+  tip.style.left = left + 'px';
+  tip.style.top  = top  + 'px';
+}}
 
 net.on('hoverNode', params => {{
   const n = dataset.nodes.get(params.node);
   if (!n) return;
-  let html = `<div class="tip-title">${{n.label}}</div>`;
+
+  let html = `<div class="tip-title">${{n.label.replace('\\n',' ')}}</div>`;
   html += `<div class="tip-row"><span class="tip-label">Type</span><span class="tip-val">${{n.group}}</span></div>`;
   if (n._like_count    != null) html += `<div class="tip-row"><span class="tip-label">Likes</span><span class="tip-val">${{n._like_count.toLocaleString()}}</span></div>`;
   if (n._comment_count != null) html += `<div class="tip-row"><span class="tip-label">Comments</span><span class="tip-val">${{n._comment_count.toLocaleString()}}</span></div>`;
   if (n._media_type)             html += `<div class="tip-row"><span class="tip-label">Media</span><span class="tip-val">${{n._media_type}}</span></div>`;
-  if (n._caption)                html += `<div class="tip-caption">"${{n._caption}}"</div>`;
-  if (n._url)                    html += `<div style="margin-top:8px"><a href="${{n._url}}" target="_blank"> Open on Instagram</a></div>`;
-  tip.innerHTML = html;
-  tip.style.display = 'block';
+  if (n._caption)                html += `<div class="tip-caption">"${{n._caption.substring(0,100)}}"</div>`;
+  if (n._url)                    html += `<a href="${{n._url}}" target="_blank" rel="noopener"> Open on Instagram</a>`;
+
+  const domPos = net.canvasToDOM(net.getPosition(params.node));
+  showTip(html, domPos.x, domPos.y);
 }});
+
 net.on('blurNode', () => {{
-  if (!hoveringTip) tip.style.display='none';
-}});
-document.addEventListener('mousemove', e => {{
-  tip.style.left = (e.clientX+18)+'px';
-  tip.style.top  = Math.max(52,(e.clientY-10))+'px';
+  if (tipPinned) return;
+  hideTimer = setTimeout(() => {{
+    if (!tipPinned) tip.style.display = 'none';
+  }}, 300);
 }});
 
 // ----- Click: zoom to node -----

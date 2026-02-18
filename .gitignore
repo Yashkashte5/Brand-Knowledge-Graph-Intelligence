@@ -1,5 +1,5 @@
 .env
-data/
+old/
 graph_view.html
 __pycache__/
 *.pyc
