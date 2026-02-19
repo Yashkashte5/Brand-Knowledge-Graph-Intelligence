@@ -1,45 +1,19 @@
-import json
+import os
 import sys
-from pathlib import Path
 
+from dotenv import load_dotenv
 
-def ensure_data() -> bool:
-    p = Path("data/nike_processed.json")
-    if p.exists():
-        try:
-            content = p.read_text().strip()
-            if content:
-                posts = json.loads(content)
-                if posts:
-                    print(f"[main] Data ready — {len(posts)} posts")
-                    return True
-        except json.JSONDecodeError:
-            print("[main] Processed file corrupted — re-ingesting …")
-
-    print("[main] No data found — running ingestion …")
-    from ingest import run_ingestion
-    return len(run_ingestion()) > 0
-
-
-def ensure_graph() -> bool:
-    from graph import build_graph
-    build_graph()
-    return True
+load_dotenv()
 
 
 def main():
-    print("\nNike Instagram Graph Intelligence")
-    print("=" * 42)
-
-    if not ensure_data():
-        print("[main] Ingestion failed. Check your APIFY_API_TOKEN in .env")
+    if not os.environ.get("APIFY_API_TOKEN"):
+        print("Error: APIFY_API_TOKEN not set in .env")
         sys.exit(1)
 
-    if not ensure_graph():
-        print("[main] Graph build failed.")
-        sys.exit(1)
-
-    print("[main] System ready — start server.py to connect Claude Desktop\n")
+    import asyncio
+    import server
+    asyncio.run(server.main())
 
 
 if __name__ == "__main__":

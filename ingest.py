@@ -1,55 +1,69 @@
+from __future__ import annotations
+
 import json
 import os
+import pickle
 import re
+import sys
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from dotenv import load_dotenv
+import numpy as np
 from apify_client import ApifyClient
+from dotenv import load_dotenv
+from keybert import KeyBERT
+from nltk.corpus import stopwords
+from sentence_transformers import SentenceTransformer
+from sklearn.cluster import KMeans
 
 load_dotenv()
 
-DATA_DIR       = Path("data")
-RAW_PATH       = DATA_DIR / "nike_raw.json"
-PROCESSED_PATH = DATA_DIR / "nike_processed.json"
-EMBED_PATH     = DATA_DIR / "graph_store" / "embeddings.pkl"
+DATA_DIR  = Path("data")
+ACTOR_ID  = "shu8hvrXbJbY3Eb9W"
+DAYS_BACK = 60
+MAX_POSTS  = 200
 
-APIFY_TOKEN = os.environ["APIFY_API_TOKEN"]
-ACTOR_ID    = "shu8hvrXbJbY3Eb9W"
-NIKE_URL    = "https://www.instagram.com/nike/"
-DAYS_BACK   = 60
-MAX_POSTS   = 200
+EMBEDDING_MODEL     = "BAAI/bge-small-en-v1.5"
+BGE_DOCUMENT_PREFIX = "Represent this sentence: "
+BGE_QUERY_PREFIX    = "Represent this sentence: "
 
-CUTOFF = datetime.now(tz=timezone.utc) - timedelta(days=DAYS_BACK)
+N_CLUSTERS      = 8     # number of themes to discover per account
+MIN_THEME_SCORE = 0.20  # min cosine similarity to cluster centre to be assigned a theme
 
-THEME_MAP = {
-    "olympics":       ["olympics","olympic","milanocortina2026","paris2024","la2028","athlete","gold","medal"],
-    "running":        ["run","running","runner","marathon","5k","10k","pace","sprint","track","road"],
-    "basketball":     ["basketball","nba","court","hoop","jordan","airjordan","lebron","kobe"],
-    "training":       ["train","training","workout","gym","fitness","strength","muscle","lift","sweat"],
-    "football":       ["football","soccer","fifa","worldcup","pitch","goal","cleats"],
-    "sustainability": ["sustainable","sustainability","planet","green","recycle","movetozero","forward"],
-    "fashion":        ["style","fashion","streetwear","drip","outfit","fit","look","wear"],
-    "women":          ["women","woman","girl","she","her","female","nikewoman","nikewomen"],
-    "kids":           ["kids","child","children","future","youth","junior","play"],
-    "just_do_it":     ["justdoit","justdo","motivation","inspire","inspiration","believe","dream"],
-    "air_max":        ["airmax","airforce","af1","airforce1","sneaker","sneakerhead","kicks","shoe"],
-}
+STOP_WORDS = set(stopwords.words("english"))
 
-def fetch_raw_posts() -> list[dict]:
-    client = ApifyClient(APIFY_TOKEN)
-    run_input = {
-        "directUrls":    [NIKE_URL],
-        "resultsType":   "posts",
-        "resultsLimit":  MAX_POSTS,
-        "addParentData": False,
-    }
-    print(f"[ingest] Starting Apify actor {ACTOR_ID} for @nike ...")
-    run   = client.actor(ACTOR_ID).call(run_input=run_input)
-    items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
-    print(f"[ingest] Received {len(items)} raw items.")
-    return items
+_embedding_model = SentenceTransformer(EMBEDDING_MODEL)
+_keybert_model   = KeyBERT(model=_embedding_model)
+
+
+# ---------------------------------------------------------------------------
+# Path helpers
+# ---------------------------------------------------------------------------
+
+def _account_dir(username: str) -> Path:
+    return DATA_DIR / username.lower().lstrip("@")
+
+def raw_path(username: str) -> Path:
+    return _account_dir(username) / "raw.json"
+
+def processed_path(username: str) -> Path:
+    return _account_dir(username) / "processed.json"
+
+def embed_path(username: str) -> Path:
+    return _account_dir(username) / "graph_store" / "embeddings.pkl"
+
+def graph_path(username: str) -> Path:
+    return _account_dir(username) / "graph_store" / "graph.gpickle"
+
+def graph_html_path(username: str, suffix: str = "") -> Path:
+    return _account_dir(username) / f"graph{suffix}.html"
+
+
+# ---------------------------------------------------------------------------
+# Normalisation helpers
+# ---------------------------------------------------------------------------
 
 def _parse_ts(raw) -> Optional[datetime]:
     if raw is None:
@@ -74,18 +88,14 @@ def _media_type(item: dict) -> str:
     raw = item.get("type") or item.get("media_type") or "image"
     if isinstance(raw, int):
         return {1: "image", 2: "video", 8: "carousel"}.get(raw, "image")
-    m = {
+    return {
         "image": "image", "graphimage": "image",
         "video": "video", "graphvideo": "video",
         "sidecar": "carousel", "graphsidecar": "carousel", "carousel": "carousel",
-    }
-    return m.get(raw.lower(), "image")
+    }.get(str(raw).lower(), "image")
 
 def _post_id(item: dict) -> str:
-    return str(
-        item.get("shortCode") or item.get("shortcode")
-        or item.get("id") or item.get("pk") or ""
-    )
+    return str(item.get("shortCode") or item.get("shortcode") or item.get("id") or item.get("pk") or "")
 
 def _extract_hashtags(caption: str, apify_tags: list) -> list[str]:
     tags = set()
@@ -96,64 +106,110 @@ def _extract_hashtags(caption: str, apify_tags: list) -> list[str]:
         tags.add(t.lower())
     return sorted(tags)
 
-def _extract_mentions(caption: str, apify_mentions: list) -> list[str]:
+def _extract_mentions(caption: str, apify_mentions: list, username: str) -> list[str]:
     mentions = set()
     for m in (apify_mentions or []):
         if isinstance(m, str):
             mentions.add(m.lstrip("@").lower())
     for m in re.findall(r"@(\w+)", caption):
-        if m.lower() != "nike":
+        if m.lower() != username.lower():
             mentions.add(m.lower())
     return sorted(mentions)
 
-def _extract_themes(caption: str, hashtags: list[str]) -> list[str]:
-    combined = caption.lower() + " " + " ".join(hashtags)
-    return [
-        theme for theme, keywords in THEME_MAP.items()
-        if any(kw in combined for kw in keywords)
-    ]
 
-def build_embeddings(posts: list[dict]) -> None:
-    """Build and cache caption embeddings using sentence-transformers (local, free)."""
-    try:
-        from sentence_transformers import SentenceTransformer
-        import pickle
-    except ImportError:
-        print("[ingest] sentence-transformers not installed — skipping embeddings.")
-        print("[ingest] Run: pip install sentence-transformers")
-        return
+# ---------------------------------------------------------------------------
+# Clustering
+# ---------------------------------------------------------------------------
 
-    print("[ingest] Building caption embeddings (all-MiniLM-L6-v2) ...")
-    model    = SentenceTransformer("all-MiniLM-L6-v2")
-    ids      = [p["post_id"] for p in posts]
-    captions = [p["caption"] or p["post_id"] for p in posts]
-    vectors  = model.encode(captions, show_progress_bar=True, convert_to_numpy=True)
+def _cluster_themes(posts: list[dict]) -> tuple[dict[str, list[str]], dict[str, dict[str, float]]]:
+    """
+    Cluster post captions using BGE embeddings + KMeans.
+    Label each cluster with KeyBERT keywords.
 
-    EMBED_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(EMBED_PATH, "wb") as f:
-        pickle.dump({"ids": ids, "vectors": vectors}, f)
-    print(f"[ingest] Embeddings saved -> {EMBED_PATH}  ({len(ids)} vectors)")
+    Returns:
+        post_themes       — {post_id: [theme_label, ...]}
+        post_theme_scores — {post_id: {theme_label: score}}
+    """
+    captioned = [p for p in posts if (p.get("caption") or "").strip()]
+    if len(captioned) < 2:
+        return {p["post_id"]: [] for p in posts}, {}
 
-def normalise(item: dict) -> Optional[dict]:
+    texts   = [BGE_DOCUMENT_PREFIX + p["caption"] for p in captioned]
+    vectors = _embedding_model.encode(texts, show_progress_bar=True, convert_to_numpy=True, normalize_embeddings=True)
+
+    n_clusters = min(N_CLUSTERS, len(captioned))
+    km      = KMeans(n_clusters=n_clusters, random_state=42, n_init="auto")
+    labels  = km.fit_predict(vectors)
+    centers = km.cluster_centers_
+
+    cluster_texts: dict[int, list[str]] = {}
+    for i, p in enumerate(captioned):
+        cluster_texts.setdefault(int(labels[i]), []).append(p["caption"])
+
+    cluster_labels: dict[int, str] = {}
+    for cid, ctexts in cluster_texts.items():
+        combined = " ".join(ctexts)
+
+        kws = _keybert_model.extract_keywords(
+            combined,
+            keyphrase_ngram_range=(1, 2),
+            stop_words="english",
+            top_n=2,
+            use_mmr=True,
+            diversity=0.5,
+        )
+        if kws:
+            cluster_labels[cid] = " & ".join(kw for kw, _ in kws)
+        else:
+            words = re.findall(r"[a-zA-Z]{3,}", combined.lower())
+            top   = [w for w, _ in Counter(w for w in words if w not in STOP_WORDS).most_common(3)]
+            cluster_labels[cid] = " & ".join(top) if top else f"theme_{cid}"
+
+    post_themes:       dict[str, list[str]]        = {}
+    post_theme_scores: dict[str, dict[str, float]] = {}
+
+    for i, p in enumerate(captioned):
+        pid        = p["post_id"]
+        cluster_id = int(labels[i])
+        center     = centers[cluster_id]
+        score      = float(np.dot(vectors[i], center / (np.linalg.norm(center) + 1e-10)))
+        theme      = cluster_labels[cluster_id]
+        post_themes[pid]       = [theme] if score >= MIN_THEME_SCORE else []
+        post_theme_scores[pid] = {theme: round(score, 4)}
+
+    for p in posts:
+        if p["post_id"] not in post_themes:
+            post_themes[p["post_id"]]       = []
+            post_theme_scores[p["post_id"]] = {}
+
+    return post_themes, post_theme_scores
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def normalise(item: dict, username: str) -> Optional[dict]:
+    """Normalise a raw Apify item — themes assigned later via clustering."""
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=DAYS_BACK)
     ts = _parse_ts(item.get("timestamp") or item.get("taken_at_timestamp"))
-    if ts is None or ts < CUTOFF:
+    if ts is None or ts < cutoff:
         return None
     pid = _post_id(item)
     if not pid:
         return None
-
     caption  = _caption(item)
     hashtags = _extract_hashtags(caption, item.get("hashtags") or [])
-    mentions = _extract_mentions(caption, item.get("mentions") or [])
-    themes   = _extract_themes(caption, hashtags)
-
+    mentions = _extract_mentions(caption, item.get("mentions") or [], username)
     return {
         "post_id":       pid,
+        "username":      username.lower().lstrip("@"),
         "url":           item.get("url") or f"https://www.instagram.com/p/{pid}/",
         "caption":       caption,
         "hashtags":      hashtags,
         "mentions":      mentions,
-        "themes":        themes,
+        "themes":        [],
+        "theme_scores":  {},
         "like_count":    int(item.get("likesCount")    or item.get("edge_media_preview_like", {}).get("count", 0) or 0),
         "comment_count": int(item.get("commentsCount") or item.get("edge_media_to_comment",  {}).get("count", 0) or 0),
         "timestamp":     ts.isoformat(),
@@ -161,32 +217,83 @@ def normalise(item: dict) -> Optional[dict]:
         "media_type":    _media_type(item),
     }
 
-def run_ingestion() -> list[dict]:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    raw_items = fetch_raw_posts()
-    RAW_PATH.write_text(json.dumps(raw_items, indent=2, default=str))
-    print(f"[ingest] Raw  -> {RAW_PATH}  ({len(raw_items)} items)")
+def build_embeddings(posts: list[dict], username: str) -> None:
+    """Encode post captions with BAAI/bge-small-en-v1.5 and persist to disk."""
+    ep = embed_path(username)
+    ep.parent.mkdir(parents=True, exist_ok=True)
+
+    ids     = [p["post_id"] for p in posts]
+    caps    = [BGE_DOCUMENT_PREFIX + (p["caption"] or p["post_id"]) for p in posts]
+    vectors = _embedding_model.encode(caps, show_progress_bar=False, convert_to_numpy=True, normalize_embeddings=True)
+
+    with open(ep, "wb") as f:
+        pickle.dump({"ids": ids, "vectors": vectors, "model": EMBEDDING_MODEL}, f)
+
+
+def scrape_account(username: str, force: bool = False) -> list[dict]:
+    username = username.lower().lstrip("@")
+    pp = processed_path(username)
+    rp = raw_path(username)
+
+    if not force and pp.exists():
+        try:
+            posts = json.loads(pp.read_text())
+            if posts:
+                return posts
+        except json.JSONDecodeError:
+            pass
+
+    _account_dir(username).mkdir(parents=True, exist_ok=True)
+
+    if not force and rp.exists():
+        try:
+            items = json.loads(rp.read_text())
+        except json.JSONDecodeError:
+            items = None
+    else:
+        items = None
+
+    if items is None:
+        apify_token = os.environ.get("APIFY_API_TOKEN")
+        if not apify_token:
+            raise EnvironmentError("APIFY_API_TOKEN not set in .env")
+        client = ApifyClient(apify_token)
+        run = client.actor(ACTOR_ID).call(run_input={
+            "directUrls":    [f"https://www.instagram.com/{username}/"],
+            "resultsType":   "posts",
+            "resultsLimit":  MAX_POSTS,
+            "addParentData": False,
+        })
+        items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
+        rp.write_text(json.dumps(items, indent=2, default=str))
 
     processed, seen = [], set()
-    for item in raw_items:
-        p = normalise(item)
+    for item in items:
+        p = normalise(item, username)
         if p and p["post_id"] not in seen:
             seen.add(p["post_id"])
             processed.append(p)
 
-    PROCESSED_PATH.write_text(json.dumps(processed, indent=2))
+    print(f"Clustering {len(processed)} posts into themes...")
+    post_themes, post_theme_scores = _cluster_themes(processed)
+    for p in processed:
+        p["themes"]       = post_themes.get(p["post_id"], [])
+        p["theme_scores"] = post_theme_scores.get(p["post_id"], {})
 
-    total_tags     = sum(len(p["hashtags"]) for p in processed)
-    total_mentions = sum(len(p["mentions"]) for p in processed)
-    total_themes   = sum(len(p["themes"])   for p in processed)
-    print(f"[ingest] Processed -> {PROCESSED_PATH}  ({len(processed)} posts in last {DAYS_BACK} days)")
-    print(f"[ingest] Extracted: {total_tags} hashtags  {total_mentions} mentions  {total_themes} theme tags")
-
-    # Always rebuild embeddings after fresh ingestion
-    build_embeddings(processed)
-
+    pp.write_text(json.dumps(processed, indent=2))
+    build_embeddings(processed, username)
     return processed
 
+
+def get_cached_accounts() -> list[str]:
+    if not DATA_DIR.exists():
+        return []
+    return [d.name for d in DATA_DIR.iterdir() if d.is_dir() and (d / "processed.json").exists()]
+
+
 if __name__ == "__main__":
-    run_ingestion()
+    if len(sys.argv) < 2:
+        print("Usage: python ingest.py <instagram_username>")
+        sys.exit(1)
+    scrape_account(sys.argv[1])
