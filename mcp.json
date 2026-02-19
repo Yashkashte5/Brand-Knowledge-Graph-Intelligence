@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "brand-mcp": {
+      "command": "Path to\\python.exe",
+      "args": [
+        "Path to \\Brand Knowledge Graph Intelligence\\server.py"
+      ],
+      "env": {
+        "APIFY_API_TOKEN": ""
+      }
+    }
+  },
+  "preferences": {
+    "sidebarMode": "chat",
+    "coworkScheduledTasksEnabled": false
+  }
+}
